@@ -953,6 +953,36 @@ public class Main extends NativeActivity implements Choreographer.FrameCallback
     });
   }
 
+  /** Updates only the exact loading portal that has exceeded its soft startup deadline. */
+  public void updateLoadingOverlayStartupDelay(String requestId, int stage) {
+    runOnUiThread(() -> {
+      if (!ExternalPlayerResultCoordinator.isValidRequestId(requestId)
+          || !requestId.equals(mLoadingOverlayRequestId)
+          || mLoadingOverlay == null) {
+        return;
+      }
+
+      switch (stage) {
+        case 0:
+          setLoadingOverlayStatus("Waiting for Kodi playback dispatch...");
+          setLoadingOverlayProgress(Math.max(mOverlayProgress, 24));
+          break;
+        case 1:
+          setLoadingOverlayStatus("Stream is taking longer to open...");
+          setLoadingOverlayProgress(Math.max(mOverlayProgress, 48));
+          break;
+        case 2:
+          setLoadingOverlayStatus("Video pipeline is taking longer to render...");
+          setLoadingOverlayProgress(Math.max(mOverlayProgress, 72));
+          break;
+        default:
+          setLoadingOverlayStatus("Waiting for synchronized audio and video...");
+          setLoadingOverlayProgress(Math.max(mOverlayProgress, 90));
+          break;
+      }
+    });
+  }
+
   /**
    * Called from native code when external player mode should exit. Sets the result intent with
    * VLC/MX Player compatible extras.

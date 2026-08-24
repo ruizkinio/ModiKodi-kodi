@@ -44,6 +44,7 @@ set(SOURCES ActorProtocol.cpp
             JumpgatePlaybackHistoryState.cpp
             JumpgatePlaybackResultState.cpp
             JumpgatePlaybackRetry.cpp
+            JumpgatePlaybackStartupWatchdog.cpp
             JumpgatePairingCoordinator.cpp
             JumpgatePairingPresenter.cpp
             JumpgatePlaybackClaimClient.cpp
@@ -166,6 +167,7 @@ set(HEADERS ActorProtocol.h
             JumpgatePlaybackHistoryState.h
             JumpgatePlaybackResultState.h
             JumpgatePlaybackRetry.h
+            JumpgatePlaybackStartupWatchdog.h
             JumpgatePairingCoordinator.h
             JumpgatePairingPresenter.h
             JumpgatePlaybackClaimClient.h

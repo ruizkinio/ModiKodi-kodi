@@ -804,6 +804,9 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
       param["player"]["speed"] = 1;
       param["player"]["playerid"] =
           static_cast<int>(CServiceBroker::GetPlaylistPlayer().GetCurrentPlaylist());
+      const int64_t rawPlaybackToken = message.GetParam1AsI64();
+      if (rawPlaybackToken > 0)
+        param["jumpgate"]["playbackToken"] = rawPlaybackToken;
       CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::Player, "OnAVStart",
                                                          m_app.CurrentFileItemPtr(), param);
       m_app.m_playerEvent.Set();

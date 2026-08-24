@@ -576,6 +576,15 @@ struct CXBMCApp::QueuedExternalPlayerResult final : KODI::MESSAGING::IApplicatio
   bool wasStandalone{false};
 };
 
+struct CXBMCApp::ExternalPlaybackStartupWake final
+{
+  std::mutex mutex;
+  std::condition_variable condition;
+  uint64_t playbackToken{0};
+  bool canceled{false};
+  bool finished{false};
+};
+
 CXBMCApp::CXBMCApp(ANativeActivity* nativeActivity, IInputHandler& inputHandler)
   : CJNIMainActivity(nativeActivity),
     CJNIBroadcastReceiver(CJNIContext::getPackageName() + ".XBMCBroadcastReceiver"),
@@ -612,6 +621,7 @@ CXBMCApp::CXBMCApp(ANativeActivity* nativeActivity, IInputHandler& inputHandler)
 
 CXBMCApp::~CXBMCApp()
 {
+  CancelExternalPlaybackStartupWake();
   CJNIMainActivity::RetireAppInstance(m_jumpgateBackLifecycleToken, m_jumpgateAppPublicationToken,
                                       this);
   CJNIMainActivity::GetJumpgateBackDispatcher().UnpublishSink(m_jumpgateBackLifecycleToken,
@@ -665,14 +675,15 @@ void CXBMCApp::Announce(ANNOUNCEMENT::AnnouncementFlag flag,
     }
     else if (message == "OnAVStart")
     {
+      uint64_t token = 0;
+      const CVariant& tokenValue = data["jumpgate"]["playbackToken"];
+      if (tokenValue.isUnsignedInteger())
+        token = tokenValue.asUnsignedInteger();
+      else if (tokenValue.isSignedInteger() && tokenValue.asInteger() > 0)
+        token = static_cast<uint64_t>(tokenValue.asInteger());
       m_mediaSessionUpdated = false;
       UpdateSessionState();
-      if (m_externalPlayerMode.load(std::memory_order_relaxed) && !m_overlayHidden)
-      {
-        call_method<void>(m_context, "hideLoadingOverlay", "()V");
-        m_overlayHidden = true;
-        CLog::Log(LOGINFO, "CXBMCApp: Loading overlay hidden at first AV start");
-      }
+      OnPlayBackAVStarted(token);
     }
   }
   else if (flag & Info)
@@ -859,6 +870,7 @@ void CXBMCApp::onDestroy()
 {
   android_printf("%s", __PRETTY_FUNCTION__);
   CancelExternalPlaybackForLifecycleTeardown();
+  CancelExternalPlaybackStartupWake();
   CJNIMainActivity::GetJumpgateBackDispatcher().UnpublishSink(m_jumpgateBackLifecycleToken,
                                                               m_jumpgateBackPublicationToken);
 
@@ -1034,6 +1046,7 @@ void CXBMCApp::Deinitialize()
   m_shutdownCoordinator.RunOnceAndWait(
       [this]
       {
+        CancelExternalPlaybackStartupWake();
         StopBridgePairingWorker(true);
         {
           auto authorityTransaction = m_playbackAuthority.BeginTransaction();
@@ -1492,7 +1505,6 @@ void CXBMCApp::OnPlayBackStarted(bool resumed, uint64_t token)
     CLog::Log(LOGINFO, "CXBMCApp: Playback started — overlay will hide when frames render");
   }
   uint64_t subtitleGeneration = 0;
-  uint64_t playbackStartedGeneration = 0;
   bool playbackAuthorityAccepted = true;
   if (resumed)
   {
@@ -1502,10 +1514,6 @@ void CXBMCApp::OnPlayBackStarted(bool resumed, uint64_t token)
     {
       playbackAuthorityAccepted = false;
       CLog::Log(LOGDEBUG, "CXBMCApp: Ignoring resume without an active playback token");
-    }
-    else
-    {
-      playbackStartedGeneration = resumedEvent->generation;
     }
   }
   else
@@ -1528,15 +1536,11 @@ void CXBMCApp::OnPlayBackStarted(bool resumed, uint64_t token)
     else if (m_externalPlayerMode.load(std::memory_order_relaxed))
     {
       subtitleGeneration = started->generation;
-      playbackStartedGeneration = started->generation;
     }
   }
-  if (playbackAuthorityAccepted && !resumed && playbackStartedGeneration != 0 &&
-      m_externalPlayerMode.load(std::memory_order_relaxed))
-  {
-    m_externalPlaybackStartedGeneration.store(playbackStartedGeneration, std::memory_order_relaxed);
-    m_externalPlaybackStartedAtSteadyMs.store(SteadyClockNowMs(), std::memory_order_relaxed);
-  }
+  if (playbackAuthorityAccepted && !resumed && token != 0)
+    m_playbackStartupWatchdog.Advance(
+        token, KODI::JUMPGATE::JumpgatePlaybackStartupStage::CoreOpened, SteadyClockNowMs());
   bool stopCanceledDispatch = false;
   if (token != 0)
   {
@@ -1564,11 +1568,40 @@ void CXBMCApp::OnPlayBackStarted(bool resumed, uint64_t token)
   }
   if (subtitleGeneration != 0 && m_jumpgateSubtitleController)
     m_jumpgateSubtitleController->MarkPlaybackReady(subtitleGeneration);
-  if (playbackAuthorityAccepted && m_externalPlayerMode.load(std::memory_order_relaxed) &&
-      m_traktScrobbler)
+  if (playbackAuthorityAccepted && resumed &&
+      m_externalPlayerMode.load(std::memory_order_relaxed) && m_traktScrobbler)
   {
-    m_traktScrobbler->OnPlaybackStarted(resumed);
+    m_traktScrobbler->OnPlaybackStarted(true);
   }
+}
+
+void CXBMCApp::OnPlayBackAVStarted(uint64_t token)
+{
+  auto lifecycleOperation = m_playbackResultState.TryBeginLifecycleOperation();
+  if (!lifecycleOperation || !m_externalPlayerMode.load(std::memory_order_relaxed) || token == 0)
+    return;
+
+  const auto binding = m_playbackStartupWatchdog.Complete(token);
+  if (binding)
+    CancelExternalPlaybackStartupWake(token);
+  const auto owner = m_playbackResultState.CurrentOwner(*lifecycleOperation);
+  if (!binding || !owner || binding->lifecycleToken != m_jumpgateBackLifecycleToken ||
+      owner->generation != binding->generation || owner->requestId != binding->requestId ||
+      !m_playbackResultState.IsCurrent(binding->generation))
+  {
+    return;
+  }
+
+  m_externalPlaybackStartedGeneration.store(binding->generation, std::memory_order_relaxed);
+  m_externalPlaybackStartedAtSteadyMs.store(SteadyClockNowMs(), std::memory_order_relaxed);
+  if (!m_overlayHidden)
+  {
+    call_method<void>(m_context, "hideLoadingOverlay", "()V");
+    m_overlayHidden = true;
+  }
+  if (m_traktScrobbler)
+    m_traktScrobbler->OnPlaybackStarted(false);
+  CLog::Log(LOGINFO, "CXBMCApp: External playback reached synchronized A/V readiness");
 }
 
 void CXBMCApp::OnPlayBackPaused()
@@ -1625,6 +1658,8 @@ void CXBMCApp::CommitExternalPlaybackTerminal(bool completed, uint64_t token, bo
   }
   if (!terminal || terminal->generation == 0)
     return;
+  m_playbackStartupWatchdog.Cancel(terminal->token);
+  CancelExternalPlaybackStartupWake(terminal->token);
   if (m_jumpgateSubtitleController)
     m_jumpgateSubtitleController->OnPlaybackTerminal(terminal->generation);
   if (superseded)
@@ -1818,6 +1853,8 @@ void CXBMCApp::ReturnToStandaloneMode()
   m_jumpgateSubtitleController.reset();
 
   // Reset external player state
+  m_playbackStartupWatchdog.Reset();
+  CancelExternalPlaybackStartupWake();
   SetExternalPlayerMode(false);
   m_resumePositionMs.store(0, std::memory_order_relaxed);
   m_resumeApplied.store(false, std::memory_order_relaxed);
@@ -2338,6 +2375,14 @@ std::optional<uint64_t> CXBMCApp::BeginExternalPlaybackContinuation()
   if (!admission)
     return std::nullopt;
 
+  const auto owner = m_playbackResultState.CurrentOwner(*lifecycleOperation);
+  if (!owner || !BeginExternalPlaybackStartupWatchdog(generation, admission->token,
+                                                       owner->requestId))
+  {
+    CommitExternalPlaybackAdmissionFailure(admission->token);
+    return std::nullopt;
+  }
+
   if (m_traktScrobbler)
     m_traktScrobbler->SetPlaybackGeneration(generation, admission->token);
   return admission->token;
@@ -2371,7 +2416,249 @@ bool CXBMCApp::CommitExternalPlaybackAdmissionFailure(uint64_t token)
     m_traktScrobbler->CancelPlaybackGeneration(canceled->generation, canceled->token);
   if (canceled && !superseded && m_jumpgateSubtitleController)
     m_jumpgateSubtitleController->OnPlaybackTerminal(canceled->generation);
+  if (canceled)
+  {
+    m_playbackStartupWatchdog.Cancel(canceled->token);
+    CancelExternalPlaybackStartupWake(canceled->token);
+  }
   return canceled.has_value() && !superseded;
+}
+
+bool CXBMCApp::BeginExternalPlaybackStartupWatchdog(uint64_t generation,
+                                                    uint64_t token,
+                                                    const std::string& requestId)
+{
+  CancelExternalPlaybackStartupWake();
+  if (!m_playbackStartupWatchdog.Begin(
+          {m_jumpgateBackLifecycleToken, generation, token, requestId}, SteadyClockNowMs()))
+  {
+    return false;
+  }
+  if (ScheduleExternalPlaybackStartupWake(token))
+    return true;
+  m_playbackStartupWatchdog.Cancel(token);
+  return false;
+}
+
+bool CXBMCApp::ScheduleExternalPlaybackStartupWake(uint64_t token)
+{
+  if (token == 0)
+    return false;
+
+  const auto registry = KODI::JUMPGATE::CJumpgateThreadRegistry::Global();
+  auto reservation = registry->Reserve();
+  if (!reservation)
+    return false;
+
+  auto state = std::make_shared<ExternalPlaybackStartupWake>();
+  state->playbackToken = token;
+  std::thread worker;
+  std::unique_lock publicationLock(m_externalPlaybackStartupWakeMutex);
+  m_externalPlaybackStartupWake = state;
+  try
+  {
+    worker = std::thread(
+        [state]
+        {
+          std::unique_lock lock(state->mutex);
+          const auto absoluteDeadline =
+              std::chrono::steady_clock::now() +
+              std::chrono::milliseconds{
+                  KODI::JUMPGATE::JUMPGATE_PLAYBACK_STARTUP_ABSOLUTE_TIMEOUT_MS};
+          auto nextWake = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds{
+                              KODI::JUMPGATE::JUMPGATE_PLAYBACK_STARTUP_SOFT_DELAY_MS};
+          while (!state->canceled)
+          {
+            if (state->condition.wait_until(lock, nextWake, [state] { return state->canceled; }))
+              break;
+            lock.unlock();
+            g_application.SignalPlayerEvent();
+            lock.lock();
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= absoluteDeadline)
+              break;
+            nextWake = std::min(
+                absoluteDeadline,
+                now + std::chrono::milliseconds{
+                          KODI::JUMPGATE::JUMPGATE_PLAYBACK_STARTUP_WAKE_INTERVAL_MS});
+          }
+          state->finished = true;
+          lock.unlock();
+          state->condition.notify_all();
+        });
+    registry->Adopt(
+        worker, std::move(reservation),
+        [state](std::chrono::milliseconds timeout)
+        {
+          std::unique_lock lock(state->mutex);
+          return state->condition.wait_for(lock, timeout, [state] { return state->finished; });
+        });
+  }
+  catch (...)
+  {
+    {
+      std::lock_guard lock(state->mutex);
+      state->canceled = true;
+    }
+    state->condition.notify_all();
+    if (worker.joinable())
+      worker.join();
+    if (m_externalPlaybackStartupWake == state)
+      m_externalPlaybackStartupWake.reset();
+    return false;
+  }
+  return true;
+}
+
+void CXBMCApp::CancelExternalPlaybackStartupWake(uint64_t token) noexcept
+{
+  try
+  {
+    std::shared_ptr<ExternalPlaybackStartupWake> state;
+    {
+      std::lock_guard lock(m_externalPlaybackStartupWakeMutex);
+      if (!m_externalPlaybackStartupWake ||
+          (token != 0 && m_externalPlaybackStartupWake->playbackToken != token))
+      {
+        return;
+      }
+      state = std::move(m_externalPlaybackStartupWake);
+    }
+    {
+      std::lock_guard lock(state->mutex);
+      state->canceled = true;
+    }
+    state->condition.notify_all();
+  }
+  catch (...)
+  {
+    CLog::Log(LOGERROR, "CXBMCApp: Failed to cancel external playback startup wake");
+  }
+}
+
+void CXBMCApp::ProcessExternalPlaybackStartupWatchdog()
+{
+  const auto signal = m_playbackStartupWatchdog.Poll(SteadyClockNowMs());
+  if (!signal)
+    return;
+
+  if (signal->type == KODI::JUMPGATE::JumpgatePlaybackStartupSignalType::Delayed)
+  {
+    call_method<void>(m_context, "updateLoadingOverlayStartupDelay", "(Ljava/lang/String;I)V",
+                      jcast<jhstring>(signal->binding.requestId),
+                      static_cast<jint>(signal->stage));
+    return;
+  }
+
+  auto lifecycleOperation = m_playbackResultState.TryBeginLifecycleOperation();
+  if (!lifecycleOperation)
+    return;
+  const auto owner = m_playbackResultState.CurrentOwner(*lifecycleOperation);
+  if (!CJNIMainActivity::GetJumpgateBackDispatcher().IsCurrentLifecycle(
+          signal->binding.lifecycleToken) ||
+      !owner || owner->generation != signal->binding.generation ||
+      owner->requestId != signal->binding.requestId ||
+      !m_playbackResultState.IsCurrent(signal->binding.generation))
+  {
+    m_playbackStartupWatchdog.AcknowledgeTimeout(signal->binding);
+    CancelExternalPlaybackStartupWake(signal->binding.playbackToken);
+    return;
+  }
+
+  std::optional<KODI::JUMPGATE::CJumpgatePlaybackAuthority::Event> expired;
+  bool started = false;
+  bool stopActivePlayback = false;
+  {
+    auto authorityTransaction = m_playbackAuthority.BeginTransaction();
+    const uint64_t activeToken = authorityTransaction.GetActiveToken();
+    started = activeToken == signal->binding.playbackToken;
+    stopActivePlayback = activeToken != 0;
+    if (started)
+      expired = authorityTransaction.CommitPlaybackTerminal(signal->binding.playbackToken, true);
+    else
+      expired = authorityTransaction.CancelPendingAdmissionByToken(signal->binding.playbackToken);
+    if (expired && (expired->generation != signal->binding.generation ||
+                    authorityTransaction.HasNewerPlayback(expired->token)))
+    {
+      expired.reset();
+    }
+  }
+  if (!expired)
+  {
+    m_playbackStartupWatchdog.AcknowledgeTimeout(signal->binding);
+    CancelExternalPlaybackStartupWake(signal->binding.playbackToken);
+    return;
+  }
+
+  std::shared_ptr<KODI::MESSAGING::COwnedThreadMessagePayload> mediaPayload;
+  bool stopAfterDispatch = started;
+  {
+    std::lock_guard lock(m_externalPlaybackQueueMutex);
+    if (m_externalPlaybackDispatchGeneration == signal->binding.generation &&
+        m_externalPlaybackDispatchToken == signal->binding.playbackToken &&
+        m_externalPlaybackDispatchRequestId == signal->binding.requestId)
+    {
+      mediaPayload = m_externalPlaybackDispatchPayload;
+      if (!started)
+      {
+        m_pendingExternalPlaybackStopGeneration = signal->binding.generation;
+        m_pendingExternalPlaybackStopToken = signal->binding.playbackToken;
+        stopAfterDispatch = true;
+      }
+    }
+  }
+
+  const bool generationPreviouslyReady =
+      m_externalPlaybackStartedGeneration.load(std::memory_order_relaxed) ==
+      signal->binding.generation;
+  if (generationPreviouslyReady)
+  {
+    const int64_t positionMs = m_lastPlaybackTimeMs.load(std::memory_order_relaxed);
+    const int64_t durationMs = m_lastPlaybackDurationMs.load(std::memory_order_relaxed);
+    if (m_traktScrobbler)
+    {
+      const auto terminal = m_traktScrobbler->StopForReplacement(false);
+      if (terminal.status == KODI::JUMPGATE::JumpgateHistoryTerminalStatus::Rejected)
+        CLog::Log(LOGWARNING, "CXBMCApp: Timed-out continuation history was rejected");
+    }
+    const int64_t observedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+    m_playbackHistoryState.UpdateProgress(signal->binding.generation, positionMs, durationMs,
+                                          observedAtMs);
+    SavePairedPlaybackHistory(false, signal->binding.generation);
+    m_playbackResultState.Capture(signal->binding.generation, positionMs, durationMs);
+  }
+  else
+  {
+    m_playbackResultState.Capture(signal->binding.generation, 0, 0);
+    if (m_traktScrobbler)
+      m_traktScrobbler->CancelPlaybackGeneration(signal->binding.generation,
+                                                 signal->binding.playbackToken);
+  }
+  m_playbackResultState.Finish(signal->binding.generation, false);
+  if (m_jumpgateSubtitleController)
+    m_jumpgateSubtitleController->OnPlaybackTerminal(signal->binding.generation);
+  m_playbackStartupWatchdog.AcknowledgeTimeout(signal->binding);
+  CancelExternalPlaybackStartupWake(signal->binding.playbackToken);
+
+  if (mediaPayload && mediaPayload->Cancel())
+    stopAfterDispatch = false;
+
+  CLog::Log(LOGERROR,
+            "CXBMCApp: External playback startup timed out at stage {} for generation {}",
+            static_cast<int>(signal->stage), signal->binding.generation);
+  DeliverPendingExternalPlayerResult(*lifecycleOperation, true);
+  if (stopActivePlayback)
+  {
+    g_application.OnAction(CAction(ACTION_STOP));
+  }
+  else if (stopAfterDispatch)
+  {
+    QueueBackCommand(BackCommand::CANCEL_PENDING_PLAYBACK, signal->binding.generation,
+                     signal->binding.playbackToken);
+  }
 }
 
 void CXBMCApp::DeliverRejectedExternalPlaybackResult(
@@ -3929,17 +4216,26 @@ void CXBMCApp::ProcessSlow()
     if (!m_overlayHidden)
       call_method<void>(m_context, "updatePlaybackPosition", "(JJ)V", currentTime, totalTime);
 
+    const CVariant& playbackTokenValue =
+        g_application.CurrentFileItem().GetProperty("jumpgate.playback_token");
+    const uint64_t playbackToken = playbackTokenValue.isUnsignedInteger()
+                                       ? playbackTokenValue.asUnsignedInteger()
+                                       : 0;
+    if (totalTime > 0)
+      m_playbackStartupWatchdog.Advance(
+          playbackToken, KODI::JUMPGATE::JumpgatePlaybackStartupStage::ParserReady,
+          SteadyClockNowMs());
+
     // Hide loading overlay once the player clock is actually advancing.
     // Separate from position tracking: totalTime > 0 fires too early (file header parsed,
     // no frames decoded yet). currentTime > 0 means actual decoding/playback is happening
     // and video frames are being rendered on the SurfaceView.
     if (!m_overlayHidden && currentTime > 0)
-    {
-      call_method<void>(m_context, "hideLoadingOverlay", "()V");
-      m_overlayHidden = true;
-      CLog::Log(LOGINFO, "CXBMCApp: Loading overlay hidden (currentTime={}ms)", currentTime);
-    }
+      OnPlayBackAVStarted(playbackToken);
   }
+
+  if (m_externalPlayerMode.load(std::memory_order_relaxed))
+    ProcessExternalPlaybackStartupWatchdog();
 
   // Apply source claims on the Kodi main thread before Trakt evaluates playback state.
   if (m_externalPlayerMode.load(std::memory_order_relaxed))
@@ -4702,7 +4998,9 @@ void CXBMCApp::onNewIntent(CJNIIntent intent, std::string preparedRequestId)
       }
       if (action == CJNIIntent::ACTION_VIEW)
       {
-        playbackAccepted = QueueExternalPlayback(std::move(item), admissionGeneration,
+        playbackAccepted = BeginExternalPlaybackStartupWatchdog(
+                               admissionGeneration, admissionToken, resultRequestId) &&
+                           QueueExternalPlayback(std::move(item), admissionGeneration,
                                                  admissionToken, resultRequestId);
       }
       else
@@ -5001,6 +5299,10 @@ void CXBMCApp::ExecuteQueuedExternalPlayback(QueuedExternalPlayback& payload)
     failAdmission();
     return;
   }
+
+  m_playbackStartupWatchdog.Advance(
+      payload.admissionToken, KODI::JUMPGATE::JumpgatePlaybackStartupStage::Dispatched,
+      SteadyClockNowMs());
 
   const auto app = shared_from_this();
   auto mediaPayload = messenger->PostMsgOwned(

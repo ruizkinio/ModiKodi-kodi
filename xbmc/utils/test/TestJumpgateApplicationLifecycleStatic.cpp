@@ -390,6 +390,15 @@ TEST(TestJumpgateApplicationLifecycleStatic,
   const std::string allowed = FunctionBody(main, "private boolean isAllowedArtworkUrl(");
   const std::string download = FunctionBody(main, "private byte[] downloadOverlayArtwork(");
   const std::string decode = FunctionBody(main, "private Bitmap decodeOverlayArtwork(");
+  const std::string delayed =
+      FunctionBody(main, "public void updateLoadingOverlayStartupDelay(");
+  const std::string watchdog =
+      FunctionBody(app, "void CXBMCApp::ProcessExternalPlaybackStartupWatchdog()");
+  const std::string scheduleWake =
+      FunctionBody(app, "bool CXBMCApp::ScheduleExternalPlaybackStartupWake(");
+  const std::string cancelWake =
+      FunctionBody(app, "void CXBMCApp::CancelExternalPlaybackStartupWake(");
+  const std::string application = ReadKodiSource("application/Application.h");
   ASSERT_FALSE(show.empty());
   ASSERT_FALSE(hide.empty());
   ASSERT_FALSE(admission.empty());
@@ -397,6 +406,11 @@ TEST(TestJumpgateApplicationLifecycleStatic,
   ASSERT_FALSE(allowed.empty());
   ASSERT_FALSE(download.empty());
   ASSERT_FALSE(decode.empty());
+  ASSERT_FALSE(delayed.empty());
+  ASSERT_FALSE(watchdog.empty());
+  ASSERT_FALSE(scheduleWake.empty());
+  ASSERT_FALSE(cancelWake.empty());
+  ASSERT_FALSE(application.empty());
 
   EXPECT_NE(show.find("ImageView.ScaleType.CENTER_CROP"), std::string::npos);
   EXPECT_NE(show.find("dp(200), dp(80)"), std::string::npos);
@@ -415,6 +429,27 @@ TEST(TestJumpgateApplicationLifecycleStatic,
             admission.find("return true;"));
   EXPECT_NE(rejectionHide.find("requestId.equals(mLoadingOverlayRequestId)"), std::string::npos);
   EXPECT_NE(rejectionHide.find("hideLoadingOverlay();"), std::string::npos);
+  EXPECT_NE(delayed.find("requestId.equals(mLoadingOverlayRequestId)"), std::string::npos);
+  EXPECT_NE(watchdog.find("TryBeginLifecycleOperation()"), std::string::npos);
+  EXPECT_NE(watchdog.find("owner->generation != signal->binding.generation"),
+            std::string::npos);
+  EXPECT_NE(watchdog.find("CancelPlaybackGeneration("), std::string::npos);
+  EXPECT_NE(watchdog.find("if (generationPreviouslyReady)"), std::string::npos);
+  EXPECT_LT(watchdog.find("if (generationPreviouslyReady)"),
+            watchdog.find("StopForReplacement(false)"));
+  EXPECT_LT(watchdog.find("else\n  {", watchdog.find("if (generationPreviouslyReady)")),
+            watchdog.find("CancelPlaybackGeneration("));
+  EXPECT_NE(watchdog.find("AcknowledgeTimeout(signal->binding)"), std::string::npos);
+  EXPECT_EQ(Count(watchdog, "AcknowledgeTimeout(signal->binding)"), 3U);
+  EXPECT_EQ(Count(watchdog,
+                  "CancelExternalPlaybackStartupWake(signal->binding.playbackToken)"),
+            3U);
+  EXPECT_NE(scheduleWake.find("CJumpgateThreadRegistry::Global()"), std::string::npos);
+  EXPECT_NE(scheduleWake.find("JUMPGATE_PLAYBACK_STARTUP_SOFT_DELAY_MS"), std::string::npos);
+  EXPECT_NE(scheduleWake.find("g_application.SignalPlayerEvent()"), std::string::npos);
+  EXPECT_NE(cancelWake.find("state->canceled = true"), std::string::npos);
+  EXPECT_NE(application.find("void SignalPlayerEvent() { m_playerEvent.Set(); }"),
+            std::string::npos);
   EXPECT_NE(main.find("mOverlayBackdropView.animate().alpha(0.50f)"), std::string::npos);
   EXPECT_NE(main.find("mOverlayPulseAnimator.setDuration(750L)"), std::string::npos);
   EXPECT_NE(main.find("R.drawable.jumpgate_wordmark"), std::string::npos);
@@ -665,6 +700,7 @@ TEST(TestJumpgateApplicationLifecycleStatic,
   const std::string onResume = FunctionBody(app, "void CXBMCApp::onResume()");
   const std::string onPause = FunctionBody(app, "void CXBMCApp::onPause()");
   const std::string playbackStarted = FunctionBody(app, "void CXBMCApp::OnPlayBackStarted(");
+  const std::string playbackReady = FunctionBody(app, "void CXBMCApp::OnPlayBackAVStarted(");
   const std::string playbackPaused = FunctionBody(app, "void CXBMCApp::OnPlayBackPaused()");
   const std::string processSlow = FunctionBody(app, "void CXBMCApp::ProcessSlow()");
   const std::string release =
@@ -672,13 +708,17 @@ TEST(TestJumpgateApplicationLifecycleStatic,
   ASSERT_FALSE(onResume.empty());
   ASSERT_FALSE(onPause.empty());
   ASSERT_FALSE(playbackStarted.empty());
+  ASSERT_FALSE(playbackReady.empty());
   ASSERT_FALSE(playbackPaused.empty());
   ASSERT_FALSE(processSlow.empty());
   ASSERT_FALSE(release.empty());
 
   EXPECT_NE(onResume.find("SetBackgrounded(false)"), std::string::npos);
   EXPECT_NE(onPause.find("SetBackgrounded(true)"), std::string::npos);
-  EXPECT_NE(playbackStarted.find("OnPlaybackStarted(resumed)"), std::string::npos);
+  EXPECT_NE(playbackStarted.find("OnPlaybackStarted(true)"), std::string::npos);
+  EXPECT_EQ(playbackStarted.find("OnPlaybackStarted(false)"), std::string::npos);
+  EXPECT_NE(playbackReady.find("OnPlaybackStarted(false)"), std::string::npos);
+  EXPECT_NE(playbackReady.find("TryBeginLifecycleOperation()"), std::string::npos);
   EXPECT_NE(playbackPaused.find("OnPlaybackPaused()"), std::string::npos);
   EXPECT_NE(processSlow.find("m_traktScrobbler->ProcessSlow()"), std::string::npos);
 
