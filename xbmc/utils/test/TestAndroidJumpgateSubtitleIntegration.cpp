@@ -251,6 +251,22 @@ TEST(TestAndroidJumpgateSubtitleIntegration, EarlyCompletionStagesBeforeExactPla
   EXPECT_EQ(injection->language, "en");
 }
 
+TEST(TestAndroidJumpgateSubtitleIntegration, LateCompletionInjectsAfterExactPlaybackStart)
+{
+  CAndroidJumpgateSubtitleLifecycle lifecycle;
+  const JumpgateSubtitleBinding binding = Binding(22);
+  ASSERT_TRUE(lifecycle.PrepareGeneration(binding.generation));
+  ASSERT_TRUE(lifecycle.Bind(binding));
+  ASSERT_TRUE(lifecycle.MarkPlaybackReady(binding.generation));
+  EXPECT_FALSE(lifecycle.TakeInjection(binding));
+
+  ASSERT_TRUE(lifecycle.AcceptStaged(
+      Staged(binding, "C:/temp/jg-22-00000000000000000000000000000022")));
+  std::optional<AndroidJumpgateStagedArtifact> injection = lifecycle.TakeInjection(binding);
+  ASSERT_TRUE(injection);
+  EXPECT_EQ(injection->language, "en");
+}
+
 TEST(TestAndroidJumpgateSubtitleIntegration, InjectedAnchorSurvivesReplacementUntilTerminalCommit)
 {
   CAndroidJumpgateSubtitleLifecycle lifecycle;

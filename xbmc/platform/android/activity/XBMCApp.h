@@ -24,6 +24,7 @@
 #include "utils/JumpgatePlaybackHistory.h"
 #include "utils/JumpgatePlaybackHistoryState.h"
 #include "utils/JumpgatePlaybackResultState.h"
+#include "utils/JumpgatePlaybackStartupWatchdog.h"
 #include "utils/JumpgateShutdownCoordinator.h"
 #include "utils/Variant.h"
 
@@ -248,6 +249,7 @@ public:
 
   // Playback callbacks
   void OnPlayBackStarted(bool resumed = false, uint64_t token = 0);
+  void OnPlayBackAVStarted(uint64_t token);
   void OnPlayBackPaused();
   void OnPlayBackStopped(bool completed = false);
   void CommitExternalPlaybackOpenFailure(uint64_t token);
@@ -359,6 +361,10 @@ private:
       std::string resultRequestId,
       KODI::JUMPGATE::CJumpgatePlaybackResultState::LifecycleOperation& lifecycleOperation);
   bool CommitExternalPlaybackAdmissionFailure(uint64_t token);
+  bool BeginExternalPlaybackStartupWatchdog(uint64_t generation,
+                                            uint64_t token,
+                                            const std::string& requestId);
+  void ProcessExternalPlaybackStartupWatchdog();
   void DeliverRejectedExternalPlaybackResult(
       std::string resultRequestId,
       KODI::JUMPGATE::CJumpgatePlaybackResultState::LifecycleOperation& lifecycleOperation);
@@ -404,6 +410,7 @@ private:
   struct QueuedBackCommand;
   struct QueuedExternalPlayback;
   struct QueuedExternalPlayerResult;
+  struct ExternalPlaybackStartupWake;
   bool QueueBackCommand(BackCommand command,
                          uint64_t playbackGeneration = 0,
                          uint64_t playbackToken = 0,
@@ -438,6 +445,8 @@ private:
   void HandoffWarmExternalPlayerTask(uint64_t generation, const std::string& requestId);
   void ExitExternalPlaybackForBack(uint64_t playbackToken);
   bool CancelPendingExternalPlaybackFromBack();
+  bool ScheduleExternalPlaybackStartupWake(uint64_t token);
+  void CancelExternalPlaybackStartupWake(uint64_t token = 0) noexcept;
   bool ExecuteExternalBackCommand();
   bool ExecuteKodiBackCommand(bool longPress);
   bool ExecuteOpenExternalSettingsCommand();
@@ -533,6 +542,9 @@ private:
   KODI::JUMPGATE::CJumpgatePlaybackAuthority m_playbackAuthority;
   std::atomic<uint64_t> m_ordinaryPlaybackAuthorityToken{0};
   KODI::JUMPGATE::CJumpgatePlaybackResultState m_playbackResultState;
+  KODI::JUMPGATE::CJumpgatePlaybackStartupWatchdog m_playbackStartupWatchdog;
+  std::mutex m_externalPlaybackStartupWakeMutex;
+  std::shared_ptr<ExternalPlaybackStartupWake> m_externalPlaybackStartupWake;
   std::mutex m_externalPlaybackQueueMutex;
   uint64_t m_externalPlaybackDispatchGeneration{0};
   uint64_t m_externalPlaybackDispatchToken{0};

@@ -169,6 +169,7 @@ public:
   bool ExecuteXBMCAction(std::string action, const std::shared_ptr<CGUIListItem>& item = NULL);
 
   bool WasPlaybackCancelled() const { return m_cancelPlayback; }
+  void SignalPlayerEvent() { m_playerEvent.Set(); }
 
 #ifdef HAS_OPTICAL_DRIVE
   std::unique_ptr<MEDIA_DETECT::CAutorun> m_Autorun;

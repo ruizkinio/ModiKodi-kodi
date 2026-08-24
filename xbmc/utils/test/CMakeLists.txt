@@ -34,6 +34,7 @@ set(SOURCES TestAlarmClock.cpp
             TestJumpgatePlaybackHistoryState.cpp
             TestJumpgatePlaybackResultState.cpp
             TestJumpgatePlaybackRetry.cpp
+            TestJumpgatePlaybackStartupWatchdog.cpp
             TestJumpgatePairingCoordinator.cpp
             TestJumpgatePairingPresenter.cpp
             TestJumpgatePlaybackClaimClient.cpp
