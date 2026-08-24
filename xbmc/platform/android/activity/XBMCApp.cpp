@@ -2562,6 +2562,7 @@ void CXBMCApp::ProcessExternalPlaybackStartupWatchdog()
       !m_playbackResultState.IsCurrent(signal->binding.generation))
   {
     m_playbackStartupWatchdog.AcknowledgeTimeout(signal->binding);
+    CancelExternalPlaybackStartupWake(signal->binding.playbackToken);
     return;
   }
 
@@ -2586,6 +2587,7 @@ void CXBMCApp::ProcessExternalPlaybackStartupWatchdog()
   if (!expired)
   {
     m_playbackStartupWatchdog.AcknowledgeTimeout(signal->binding);
+    CancelExternalPlaybackStartupWake(signal->binding.playbackToken);
     return;
   }
 
@@ -2639,6 +2641,7 @@ void CXBMCApp::ProcessExternalPlaybackStartupWatchdog()
   if (m_jumpgateSubtitleController)
     m_jumpgateSubtitleController->OnPlaybackTerminal(signal->binding.generation);
   m_playbackStartupWatchdog.AcknowledgeTimeout(signal->binding);
+  CancelExternalPlaybackStartupWake(signal->binding.playbackToken);
 
   if (mediaPayload && mediaPayload->Cancel())
     stopAfterDispatch = false;

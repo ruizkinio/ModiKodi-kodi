@@ -440,6 +440,10 @@ TEST(TestJumpgateApplicationLifecycleStatic,
   EXPECT_LT(watchdog.find("else\n  {", watchdog.find("if (generationPreviouslyReady)")),
             watchdog.find("CancelPlaybackGeneration("));
   EXPECT_NE(watchdog.find("AcknowledgeTimeout(signal->binding)"), std::string::npos);
+  EXPECT_EQ(Count(watchdog, "AcknowledgeTimeout(signal->binding)"), 3U);
+  EXPECT_EQ(Count(watchdog,
+                  "CancelExternalPlaybackStartupWake(signal->binding.playbackToken)"),
+            3U);
   EXPECT_NE(scheduleWake.find("CJumpgateThreadRegistry::Global()"), std::string::npos);
   EXPECT_NE(scheduleWake.find("JUMPGATE_PLAYBACK_STARTUP_SOFT_DELAY_MS"), std::string::npos);
   EXPECT_NE(scheduleWake.find("g_application.SignalPlayerEvent()"), std::string::npos);
